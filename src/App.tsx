@@ -162,7 +162,7 @@ export default function App() {
         </header>
 
         {/* Main Content Layout */}
-        <div className="grid grid-cols-1 xl:grid-cols-3 gap-8 xl:h-[calc(100vh-14rem)] xl:min-h-[700px]">
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-8 xl:h-[calc(100vh-10rem)] xl:min-h-[820px]">
           
           {/* Left Column: Chart & Trades */}
           <div className="xl:col-span-2 flex flex-col gap-8 h-full min-h-0">
