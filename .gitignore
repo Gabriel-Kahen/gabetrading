@@ -23,3 +23,5 @@ gabejaytrading/build
 *.njsproj
 *.sln
 *.sw?
+backend/.venv
+backend/data/state.json

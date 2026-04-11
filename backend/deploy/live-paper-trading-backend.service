@@ -1,0 +1,14 @@
+[Unit]
+Description=Live Paper Trading Backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/gabe/code/live_trading
+ExecStart=/home/gabe/code/live_trading/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

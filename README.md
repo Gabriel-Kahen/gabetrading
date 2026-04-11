@@ -6,6 +6,7 @@ Source for `gabetrading.com`.
 
 - `src/`: the current live `gabetrading` site built with Vite.
 - `gabejaytrading/`: the legacy `gabejaytrading` frontend source.
+- `backend/`: the FastAPI paper-trading backend that powers the live dashboard.
 
 The root site deploys at `/`.
 
@@ -24,6 +25,16 @@ Run the current site locally:
 
 ```bash
 npm run dev
+```
+
+Run the backend locally:
+
+```bash
+cd backend
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .[dev]
+uvicorn app.main:app --reload
 ```
 
 Run the legacy site locally:
