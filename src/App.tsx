@@ -12,6 +12,7 @@ import {
 import type { PortfolioSnapshot, Position, Trade, EquityPoint } from './types';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
+const MOBILE_EXECUTION_PAGE_SIZE = 25;
 
 function formatCurrency(val: number) {
   return new Intl.NumberFormat('en-US', {
@@ -51,7 +52,8 @@ export default function App() {
   const [loading, setLoading] = useState(true);
 
   const [showBenchmark, setShowBenchmark] = useState(false);
-  const [showExecutionLog, setShowExecutionLog] = useState(() => typeof window !== 'undefined' && window.innerWidth >= 768);
+  const [showExecutionLog, setShowExecutionLog] = useState(false);
+  const [mobileExecutionPage, setMobileExecutionPage] = useState(1);
 
   const fetchData = async () => {
     try {
@@ -77,6 +79,10 @@ export default function App() {
     const interval = setInterval(fetchData, 10_000); // 10s auto refresh
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    setMobileExecutionPage(1);
+  }, [showExecutionLog]);
 
   if (loading) {
     return (
@@ -121,6 +127,12 @@ export default function App() {
   const spansMultipleYears = new Set(
     chartData.map((pt) => new Date(pt.timestamp).getFullYear())
   ).size > 1;
+  const mobileExecutionPageCount = Math.max(1, Math.ceil(trades.length / MOBILE_EXECUTION_PAGE_SIZE));
+  const currentMobileExecutionPage = Math.min(mobileExecutionPage, mobileExecutionPageCount);
+  const mobileExecutionTrades = trades.slice(
+    (currentMobileExecutionPage - 1) * MOBILE_EXECUTION_PAGE_SIZE,
+    currentMobileExecutionPage * MOBILE_EXECUTION_PAGE_SIZE,
+  );
 
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-[#d4d4d4] font-sans p-4 sm:p-8 selection:bg-[#262626]">
@@ -162,7 +174,7 @@ export default function App() {
         </header>
 
         {/* Main Content Layout */}
-        <div className="grid grid-cols-1 xl:grid-cols-3 gap-8 xl:h-[calc(100vh-8rem)] xl:min-h-[860px]">
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-8 xl:h-[calc(100vh-5rem)] xl:min-h-[940px]">
           
           {/* Left Column: Chart & Trades */}
           <div className="xl:col-span-2 flex flex-col gap-8 h-full min-h-0">
@@ -264,21 +276,12 @@ export default function App() {
 
             {/* Trades Table */}
             <div className="hidden rounded-sm border border-[#262626] bg-[#121212] md:flex md:flex-col flex-1 min-h-0">
-              <button
-                type="button"
-                onClick={() => setShowExecutionLog((value) => !value)}
-                className="flex items-center justify-between gap-4 border-b border-[#262626] p-4 text-left transition-colors hover:bg-[#171717]"
-              >
+              <div className="flex items-center justify-between gap-4 border-b border-[#262626] p-4">
                 <div className="flex items-center gap-3">
                   <h2 className="text-sm font-mono text-[#a3a3a3] uppercase tracking-wider">Execution Log</h2>
                   <span className="text-[10px] font-mono uppercase tracking-wider text-[#737373]">{trades.length} entries</span>
                 </div>
-                <span className="font-mono text-[10px] uppercase tracking-wider text-[#737373]">
-                  {showExecutionLog ? 'Hide' : 'Show'}
-                </span>
-              </button>
-              {showExecutionLog && (
-                <>
+              </div>
               <div className="flex-1 overflow-auto hidden md:block min-h-0">
                 <table className="w-full text-sm text-left">
                   <thead className="text-[10px] uppercase tracking-wider text-[#737373] bg-[#1a1a1a] sticky top-0 z-10 shadow-sm">
@@ -330,51 +333,6 @@ export default function App() {
                   </tbody>
                 </table>
               </div>
-              <div className="divide-y divide-[#262626] md:hidden">
-                {trades.length === 0 && (
-                  <div className="px-5 py-8 text-center font-mono text-sm text-[#525252]">No executions recorded.</div>
-                )}
-                {trades.map((t, i) => {
-                  const isBuy = t.side === 'buy' || t.side === 'cover';
-                  const driverText = t.explanation || t.rationale;
-                  return (
-                    <details key={i} className="group px-4 py-4">
-                      <summary className="list-none cursor-pointer">
-                        <div className="flex items-start justify-between gap-4">
-                          <div className="min-w-0 space-y-2">
-                            <div className="flex items-center gap-3">
-                              <span className={`px-2 py-0.5 text-[10px] uppercase tracking-wider font-bold rounded-sm ${isBuy ? 'bg-[#052e16] text-[#10b981]' : 'bg-[#4c0519] text-[#f43f5e]'}`}>
-                                {t.side}
-                              </span>
-                              <span className="font-mono text-lg font-medium text-[#ededed]">{t.symbol}</span>
-                            </div>
-                            <div className="font-mono text-[11px] text-[#737373]">
-                              {format(new Date(t.timestamp), 'MM/dd/yy')} <span className="opacity-50 mx-1">•</span> {format(new Date(t.timestamp), 'HH:mm:ss')}
-                            </div>
-                          </div>
-                          <div className="shrink-0 text-right font-mono">
-                            <div className="text-sm text-[#ededed]">{formatCurrency(t.price)}</div>
-                            <div className="text-xs text-[#737373]">{t.quantity.toFixed(2)} sh</div>
-                          </div>
-                        </div>
-                        <div className="mt-3 flex items-center justify-between gap-3">
-                          <p className="min-w-0 flex-1 truncate font-mono text-xs leading-relaxed text-[#a3a3a3]">
-                            {driverText}
-                          </p>
-                          <span className="shrink-0 font-mono text-[10px] uppercase tracking-wider text-[#737373] transition-colors group-open:text-[#a3a3a3]">
-                            Tap to expand
-                          </span>
-                        </div>
-                      </summary>
-                      <div className="mt-3 rounded-sm border border-[#262626] bg-[#090909] p-3 font-mono text-xs leading-6 text-[#d4d4d4]">
-                        {driverText}
-                      </div>
-                    </details>
-                  );
-                })}
-              </div>
-                </>
-              )}
             </div>
 
           </div>
@@ -498,11 +456,11 @@ export default function App() {
                 {trades.length === 0 && (
                   <div className="px-5 py-8 text-center font-mono text-sm text-[#525252]">No executions recorded.</div>
                 )}
-                {trades.map((t, i) => {
+                {mobileExecutionTrades.map((t, i) => {
                   const isBuy = t.side === 'buy' || t.side === 'cover';
                   const driverText = t.explanation || t.rationale;
                   return (
-                    <details key={i} className="group px-4 py-4">
+                    <details key={`${currentMobileExecutionPage}-${i}`} className="group px-4 py-4">
                       <summary className="list-none cursor-pointer">
                         <div className="flex items-start justify-between gap-4">
                           <div className="min-w-0 space-y-2">
@@ -536,6 +494,29 @@ export default function App() {
                     </details>
                   );
                 })}
+                {trades.length > MOBILE_EXECUTION_PAGE_SIZE && (
+                  <div className="flex items-center justify-between gap-4 border-t border-[#262626] px-4 py-3 font-mono text-[10px] uppercase tracking-wider text-[#737373]">
+                    <button
+                      type="button"
+                      onClick={() => setMobileExecutionPage((page) => Math.max(1, page - 1))}
+                      disabled={currentMobileExecutionPage === 1}
+                      className="rounded-sm border border-[#262626] px-3 py-2 transition-colors enabled:hover:bg-[#171717] disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      Newer
+                    </button>
+                    <span>
+                      Page {currentMobileExecutionPage} / {mobileExecutionPageCount}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setMobileExecutionPage((page) => Math.min(mobileExecutionPageCount, page + 1))}
+                      disabled={currentMobileExecutionPage === mobileExecutionPageCount}
+                      className="rounded-sm border border-[#262626] px-3 py-2 transition-colors enabled:hover:bg-[#171717] disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      Older
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </div>
