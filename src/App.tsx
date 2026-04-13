@@ -13,6 +13,7 @@ import type { PortfolioSnapshot, Position, Trade, EquityPoint, ClosedPosition } 
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
 const MOBILE_EXECUTION_PAGE_SIZE = 25;
+const CLOSED_POSITIONS_PAGE_SIZE = 10;
 
 type ClosedPositionSort = 'gainCash' | 'lossCash' | 'gainPercent' | 'lossPercent';
 
@@ -57,7 +58,8 @@ export default function App() {
   const [showBenchmark, setShowBenchmark] = useState(false);
   const [showExecutionLog, setShowExecutionLog] = useState(false);
   const [mobileExecutionPage, setMobileExecutionPage] = useState(1);
-  const [closedPositionSort, setClosedPositionSort] = useState<ClosedPositionSort>('lossCash');
+  const [closedPositionSort, setClosedPositionSort] = useState<ClosedPositionSort>('gainPercent');
+  const [closedPositionsPage, setClosedPositionsPage] = useState(1);
 
   const fetchData = async () => {
     try {
@@ -91,6 +93,10 @@ export default function App() {
   useEffect(() => {
     setMobileExecutionPage(1);
   }, [showExecutionLog]);
+
+  useEffect(() => {
+    setClosedPositionsPage(1);
+  }, [closedPositionSort, closedPositions.length]);
 
   if (loading) {
     return (
@@ -155,6 +161,12 @@ export default function App() {
         return 0;
     }
   });
+  const closedPositionsPageCount = Math.max(1, Math.ceil(sortedClosedPositions.length / CLOSED_POSITIONS_PAGE_SIZE));
+  const currentClosedPositionsPage = Math.min(closedPositionsPage, closedPositionsPageCount);
+  const paginatedClosedPositions = sortedClosedPositions.slice(
+    (currentClosedPositionsPage - 1) * CLOSED_POSITIONS_PAGE_SIZE,
+    currentClosedPositionsPage * CLOSED_POSITIONS_PAGE_SIZE,
+  );
 
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-[#d4d4d4] font-sans p-4 sm:p-8 selection:bg-[#262626]">
@@ -558,10 +570,10 @@ export default function App() {
                 onChange={(event) => setClosedPositionSort(event.target.value as ClosedPositionSort)}
                 className="rounded-sm border border-[#262626] bg-[#0f0f0f] px-3 py-2 text-[#d4d4d4] outline-none transition-colors hover:border-[#404040]"
               >
-                <option value="lossCash">Biggest Loss ($)</option>
-                <option value="gainCash">Biggest Gain ($)</option>
-                <option value="lossPercent">Biggest Loss (%)</option>
                 <option value="gainPercent">Biggest Gain (%)</option>
+                <option value="lossPercent">Biggest Loss (%)</option>
+                <option value="gainCash">Biggest Gain ($)</option>
+                <option value="lossCash">Biggest Loss ($)</option>
               </select>
             </label>
           </div>
@@ -584,7 +596,7 @@ export default function App() {
                     <td colSpan={7} className="px-4 py-8 text-center text-[#525252]">No closed positions yet.</td>
                   </tr>
                 )}
-                {sortedClosedPositions.map((position, index) => (
+                {paginatedClosedPositions.map((position, index) => (
                   <tr key={`${position.symbol}-${position.closed_at}-${index}`} className="transition-colors hover:bg-[#1a1a1a]">
                     <td className="px-4 py-4">
                       <div className="font-medium text-[#ededed]">{position.symbol}</div>
@@ -610,7 +622,7 @@ export default function App() {
               {sortedClosedPositions.length === 0 && (
                 <div className="px-4 py-8 text-center font-mono text-sm text-[#525252]">No closed positions yet.</div>
               )}
-              {sortedClosedPositions.map((position, index) => (
+              {paginatedClosedPositions.map((position, index) => (
                 <div key={`${position.symbol}-${position.closed_at}-${index}-mobile`} className="p-4 font-mono">
                   <div className="flex items-start justify-between gap-4">
                     <div>
@@ -644,6 +656,29 @@ export default function App() {
                 </div>
               ))}
             </div>
+            {sortedClosedPositions.length > CLOSED_POSITIONS_PAGE_SIZE && (
+              <div className="flex items-center justify-between gap-4 border-t border-[#262626] px-4 py-3 font-mono text-[10px] uppercase tracking-wider text-[#737373]">
+                <button
+                  type="button"
+                  onClick={() => setClosedPositionsPage((page) => Math.max(1, page - 1))}
+                  disabled={currentClosedPositionsPage === 1}
+                  className="rounded-sm border border-[#262626] px-3 py-2 transition-colors enabled:hover:bg-[#171717] disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Prev
+                </button>
+                <span>
+                  Page {currentClosedPositionsPage} / {closedPositionsPageCount}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setClosedPositionsPage((page) => Math.min(closedPositionsPageCount, page + 1))}
+                  disabled={currentClosedPositionsPage === closedPositionsPageCount}
+                  className="rounded-sm border border-[#262626] px-3 py-2 transition-colors enabled:hover:bg-[#171717] disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Next
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </div>
