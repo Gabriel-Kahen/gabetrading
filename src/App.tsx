@@ -9,10 +9,12 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from 'recharts';
-import type { PortfolioSnapshot, Position, Trade, EquityPoint } from './types';
+import type { PortfolioSnapshot, Position, Trade, EquityPoint, ClosedPosition } from './types';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
 const MOBILE_EXECUTION_PAGE_SIZE = 25;
+
+type ClosedPositionSort = 'gainCash' | 'lossCash' | 'gainPercent' | 'lossPercent';
 
 function formatCurrency(val: number) {
   return new Intl.NumberFormat('en-US', {
@@ -48,25 +50,31 @@ export default function App() {
   const [portfolio, setPortfolio] = useState<PortfolioSnapshot | null>(null);
   const [holdings, setHoldings] = useState<Position[]>([]);
   const [trades, setTrades] = useState<Trade[]>([]);
+  const [closedPositions, setClosedPositions] = useState<ClosedPosition[]>([]);
   const [performance, setPerformance] = useState<EquityPoint[]>([]);
   const [loading, setLoading] = useState(true);
 
   const [showBenchmark, setShowBenchmark] = useState(false);
   const [showExecutionLog, setShowExecutionLog] = useState(false);
   const [mobileExecutionPage, setMobileExecutionPage] = useState(1);
+  const [closedPositionSort, setClosedPositionSort] = useState<ClosedPositionSort>('lossCash');
 
   const fetchData = async () => {
     try {
-      const [pf, h, t, p] = await Promise.all([
+      const [pf, h, t, p, c] = await Promise.all([
         fetch(`${API_BASE}/portfolio`).then((res) => res.json()),
         fetch(`${API_BASE}/holdings`).then((res) => res.json()),
         fetch(`${API_BASE}/trades`).then((res) => res.json()),
         fetch(`${API_BASE}/performance`).then((res) => res.json()),
+        fetch(`${API_BASE}/closed-positions`)
+          .then((res) => (res.ok ? res.json() : []))
+          .catch(() => []),
       ]);
       setPortfolio(pf);
       setHoldings(h);
       setTrades(t);
       setPerformance(p);
+      setClosedPositions(c);
     } catch (err) {
       console.error('Failed to fetch data:', err);
     } finally {
@@ -133,6 +141,20 @@ export default function App() {
     (currentMobileExecutionPage - 1) * MOBILE_EXECUTION_PAGE_SIZE,
     currentMobileExecutionPage * MOBILE_EXECUTION_PAGE_SIZE,
   );
+  const sortedClosedPositions = [...closedPositions].sort((a, b) => {
+    switch (closedPositionSort) {
+      case 'gainCash':
+        return b.realized_pnl - a.realized_pnl;
+      case 'lossCash':
+        return a.realized_pnl - b.realized_pnl;
+      case 'gainPercent':
+        return b.realized_return_pct - a.realized_return_pct;
+      case 'lossPercent':
+        return a.realized_return_pct - b.realized_return_pct;
+      default:
+        return 0;
+    }
+  });
 
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-[#d4d4d4] font-sans p-4 sm:p-8 selection:bg-[#262626]">
@@ -521,6 +543,108 @@ export default function App() {
             )}
           </div>
 
+        </div>
+
+        <div className="rounded-sm border border-[#262626] bg-[#121212]">
+          <div className="flex flex-col gap-4 border-b border-[#262626] p-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-3">
+              <h2 className="text-sm font-mono text-[#a3a3a3] uppercase tracking-wider">Closed Positions</h2>
+              <span className="text-[10px] font-mono uppercase tracking-wider text-[#737373]">{closedPositions.length} closed</span>
+            </div>
+            <label className="flex items-center gap-3 font-mono text-[10px] uppercase tracking-wider text-[#737373]">
+              <span>Sort</span>
+              <select
+                value={closedPositionSort}
+                onChange={(event) => setClosedPositionSort(event.target.value as ClosedPositionSort)}
+                className="rounded-sm border border-[#262626] bg-[#0f0f0f] px-3 py-2 text-[#d4d4d4] outline-none transition-colors hover:border-[#404040]"
+              >
+                <option value="lossCash">Biggest Loss ($)</option>
+                <option value="gainCash">Biggest Gain ($)</option>
+                <option value="lossPercent">Biggest Loss (%)</option>
+                <option value="gainPercent">Biggest Gain (%)</option>
+              </select>
+            </label>
+          </div>
+          <div className="overflow-auto">
+            <table className="hidden min-w-full text-left text-sm md:table">
+              <thead className="sticky top-0 z-10 bg-[#1a1a1a] text-[10px] uppercase tracking-wider text-[#737373] shadow-sm">
+                <tr>
+                  <th className="px-4 py-3 font-medium">Symbol</th>
+                  <th className="px-4 py-3 font-medium">Opened</th>
+                  <th className="px-4 py-3 font-medium">Closed</th>
+                  <th className="px-4 py-3 font-medium text-right">Qty</th>
+                  <th className="px-4 py-3 font-medium text-right">Entry</th>
+                  <th className="px-4 py-3 font-medium text-right">Exit</th>
+                  <th className="px-4 py-3 font-medium text-right">P&amp;L</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[#262626] font-mono">
+                {sortedClosedPositions.length === 0 && (
+                  <tr>
+                    <td colSpan={7} className="px-4 py-8 text-center text-[#525252]">No closed positions yet.</td>
+                  </tr>
+                )}
+                {sortedClosedPositions.map((position, index) => (
+                  <tr key={`${position.symbol}-${position.closed_at}-${index}`} className="transition-colors hover:bg-[#1a1a1a]">
+                    <td className="px-4 py-4">
+                      <div className="font-medium text-[#ededed]">{position.symbol}</div>
+                      <div className={`mt-0.5 text-[10px] ${position.direction === 'long' ? 'text-[#10b981]' : 'text-[#f43f5e]'}`}>
+                        {position.direction.toUpperCase()}
+                      </div>
+                    </td>
+                    <td className="px-4 py-4 text-[#a3a3a3]">{format(new Date(position.opened_at), 'MM/dd/yy HH:mm')}</td>
+                    <td className="px-4 py-4 text-[#a3a3a3]">{format(new Date(position.closed_at), 'MM/dd/yy HH:mm')}</td>
+                    <td className="px-4 py-4 text-right text-[#a3a3a3]">{position.quantity.toFixed(2)}</td>
+                    <td className="px-4 py-4 text-right text-[#a3a3a3]">{formatCurrency(position.average_entry_price)}</td>
+                    <td className="px-4 py-4 text-right text-[#a3a3a3]">{formatCurrency(position.average_exit_price)}</td>
+                    <td className={`px-4 py-4 text-right ${position.realized_pnl >= 0 ? 'text-[#10b981]' : 'text-[#f43f5e]'}`}>
+                      <div>{position.realized_pnl > 0 ? '+' : ''}{formatCurrency(position.realized_pnl)}</div>
+                      <div className="mt-0.5 text-[10px] opacity-80">{position.realized_return_pct > 0 ? '+' : ''}{position.realized_return_pct.toFixed(2)}%</div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+
+            <div className="divide-y divide-[#262626] md:hidden">
+              {sortedClosedPositions.length === 0 && (
+                <div className="px-4 py-8 text-center font-mono text-sm text-[#525252]">No closed positions yet.</div>
+              )}
+              {sortedClosedPositions.map((position, index) => (
+                <div key={`${position.symbol}-${position.closed_at}-${index}-mobile`} className="p-4 font-mono">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-lg font-medium text-[#ededed]">{position.symbol}</span>
+                        <span className={`text-[10px] uppercase tracking-wider ${position.direction === 'long' ? 'text-[#10b981]' : 'text-[#f43f5e]'}`}>
+                          {position.direction}
+                        </span>
+                      </div>
+                      <div className="mt-2 text-[11px] text-[#737373]">{format(new Date(position.closed_at), 'MM/dd/yy HH:mm')}</div>
+                    </div>
+                    <div className={`text-right ${position.realized_pnl >= 0 ? 'text-[#10b981]' : 'text-[#f43f5e]'}`}>
+                      <div className="text-sm">{position.realized_pnl > 0 ? '+' : ''}{formatCurrency(position.realized_pnl)}</div>
+                      <div className="mt-0.5 text-xs">{position.realized_return_pct > 0 ? '+' : ''}{position.realized_return_pct.toFixed(2)}%</div>
+                    </div>
+                  </div>
+                  <div className="mt-4 grid grid-cols-3 gap-3 border-t border-[#262626] pt-3 text-xs text-[#a3a3a3]">
+                    <div>
+                      <div className="mb-1 text-[10px] uppercase tracking-wider text-[#737373]">Qty</div>
+                      <div>{position.quantity.toFixed(2)}</div>
+                    </div>
+                    <div className="text-right">
+                      <div className="mb-1 text-[10px] uppercase tracking-wider text-[#737373]">Entry</div>
+                      <div>{formatCurrency(position.average_entry_price)}</div>
+                    </div>
+                    <div className="text-right">
+                      <div className="mb-1 text-[10px] uppercase tracking-wider text-[#737373]">Exit</div>
+                      <div>{formatCurrency(position.average_exit_price)}</div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
       </div>
     </div>

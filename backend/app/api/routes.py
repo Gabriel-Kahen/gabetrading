@@ -24,6 +24,10 @@ def build_router(orchestrator: TradingOrchestrator) -> APIRouter:
     def get_trades():
         return orchestrator.portfolio.get_trades()
 
+    @router.get("/closed-positions")
+    def get_closed_positions():
+        return orchestrator.portfolio.get_closed_positions()
+
     @router.get("/performance")
     def get_performance():
         return orchestrator.portfolio.get_equity_curve()

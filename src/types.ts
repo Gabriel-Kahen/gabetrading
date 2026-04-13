@@ -20,6 +20,18 @@ export interface Trade {
   explanation: string;
 }
 
+export interface ClosedPosition {
+  symbol: string;
+  direction: 'long' | 'short';
+  opened_at: string;
+  closed_at: string;
+  quantity: number;
+  average_entry_price: number;
+  average_exit_price: number;
+  realized_pnl: number;
+  realized_return_pct: number;
+}
+
 export interface EquityPoint {
   timestamp: string;
   equity: number;

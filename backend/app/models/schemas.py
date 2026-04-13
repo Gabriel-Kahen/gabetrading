@@ -31,6 +31,18 @@ class Trade(BaseModel):
     explanation: str = ""
 
 
+class ClosedPosition(BaseModel):
+    symbol: str
+    direction: Literal["long", "short"]
+    opened_at: datetime
+    closed_at: datetime
+    quantity: float
+    average_entry_price: float
+    average_exit_price: float
+    realized_pnl: float
+    realized_return_pct: float
+
+
 class EquityPoint(BaseModel):
     timestamp: datetime
     equity: float

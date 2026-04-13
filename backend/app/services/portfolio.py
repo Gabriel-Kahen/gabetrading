@@ -6,7 +6,7 @@ from pathlib import Path
 from threading import Lock
 
 from app.config import settings
-from app.models.schemas import EngineState, EquityPoint, PortfolioSnapshot, Position, Signal, Trade
+from app.models.schemas import ClosedPosition, EngineState, EquityPoint, PortfolioSnapshot, Position, Signal, Trade
 from app.services.explanations import TradeExplanationService
 
 
@@ -28,6 +28,10 @@ class PortfolioService:
     def get_trades(self) -> list[Trade]:
         with self._lock:
             return list(reversed(self._state.trades))
+
+    def get_closed_positions(self) -> list[ClosedPosition]:
+        with self._lock:
+            return self._build_closed_positions()
 
     def get_equity_curve(self) -> list[EquityPoint]:
         with self._lock:
@@ -216,6 +220,108 @@ class PortfolioService:
         )
         self._state.equity_curve = self._state.equity_curve[-1000:]
         self._state.trades = self._state.trades[-5000:]
+
+    def _build_closed_positions(self) -> list[ClosedPosition]:
+        lots_by_symbol: dict[str, list[dict]] = {}
+        lifecycle_by_symbol: dict[str, dict] = {}
+        closed_positions: list[ClosedPosition] = []
+
+        for trade in self._state.trades:
+            if trade.side in {"buy", "cover"}:
+                incoming_direction = "long"
+                incoming_quantity = float(trade.quantity)
+            else:
+                incoming_direction = "short"
+                incoming_quantity = float(trade.quantity)
+
+            lots = lots_by_symbol.setdefault(trade.symbol, [])
+            lifecycle = lifecycle_by_symbol.get(trade.symbol)
+
+            if not lots:
+                lifecycle = self._start_lifecycle(trade, incoming_direction)
+                lifecycle_by_symbol[trade.symbol] = lifecycle
+
+            remaining_quantity = incoming_quantity
+            while remaining_quantity > 0 and lots and lots[0]["direction"] != incoming_direction:
+                open_lot = lots[0]
+                matched_quantity = min(remaining_quantity, open_lot["quantity"])
+
+                if open_lot["direction"] == "long":
+                    realized_pnl = (trade.price - open_lot["price"]) * matched_quantity
+                else:
+                    realized_pnl = (open_lot["price"] - trade.price) * matched_quantity
+
+                if lifecycle is None:
+                    lifecycle = self._start_lifecycle_from_lot(open_lot)
+                    lifecycle_by_symbol[trade.symbol] = lifecycle
+
+                lifecycle["closed_quantity"] += matched_quantity
+                lifecycle["entry_notional"] += open_lot["price"] * matched_quantity
+                lifecycle["exit_notional"] += trade.price * matched_quantity
+                lifecycle["realized_pnl"] += realized_pnl
+                lifecycle["closed_at"] = trade.timestamp
+
+                open_lot["quantity"] -= matched_quantity
+                remaining_quantity -= matched_quantity
+
+                if open_lot["quantity"] <= 1e-9:
+                    lots.pop(0)
+
+            if lifecycle is not None and not lots and lifecycle["closed_quantity"] > 0:
+                closed_positions.append(
+                    ClosedPosition(
+                        symbol=trade.symbol,
+                        direction=lifecycle["direction"],
+                        opened_at=lifecycle["opened_at"],
+                        closed_at=lifecycle["closed_at"],
+                        quantity=lifecycle["closed_quantity"],
+                        average_entry_price=lifecycle["entry_notional"] / lifecycle["closed_quantity"],
+                        average_exit_price=lifecycle["exit_notional"] / lifecycle["closed_quantity"],
+                        realized_pnl=lifecycle["realized_pnl"],
+                        realized_return_pct=(lifecycle["realized_pnl"] / lifecycle["entry_notional"]) * 100
+                        if lifecycle["entry_notional"] > 0
+                        else 0.0,
+                    )
+                )
+                lifecycle = None
+                lifecycle_by_symbol.pop(trade.symbol, None)
+
+            if remaining_quantity > 0:
+                if not lots and lifecycle is None:
+                    lifecycle = self._start_lifecycle(trade, incoming_direction)
+                    lifecycle_by_symbol[trade.symbol] = lifecycle
+                lots.append(
+                    {
+                        "quantity": remaining_quantity,
+                        "price": float(trade.price),
+                        "timestamp": trade.timestamp,
+                        "direction": incoming_direction,
+                    }
+                )
+
+        return list(reversed(closed_positions))
+
+    def _start_lifecycle(self, trade: Trade, direction: str) -> dict:
+        return {
+            "direction": direction,
+            "opened_at": trade.timestamp,
+            "closed_at": trade.timestamp,
+            "closed_quantity": 0.0,
+            "entry_notional": 0.0,
+            "exit_notional": 0.0,
+            "realized_pnl": 0.0,
+        }
+
+    def _start_lifecycle_from_lot(self, lot: dict) -> dict:
+        return {
+            "direction": lot["direction"],
+            "opened_at": lot["timestamp"],
+            "closed_at": lot["timestamp"],
+            "closed_quantity": 0.0,
+            "entry_notional": 0.0,
+            "exit_notional": 0.0,
+            "realized_pnl": 0.0,
+        }
 
     def _load_or_initialize(self, path: Path) -> EngineState:
         if path.exists():
