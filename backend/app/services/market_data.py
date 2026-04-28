@@ -79,6 +79,8 @@ class MarketDataService:
             return prices
 
         multi_symbol = isinstance(history.columns, pd.MultiIndex)
+        latest_batch_timestamp = self._latest_timestamp(history)
+        max_staleness = self._max_bar_staleness()
         for symbol in symbols:
             try:
                 if multi_symbol:
@@ -86,10 +88,47 @@ class MarketDataService:
                 else:
                     close_series = history["Close"].dropna()
                 if not close_series.empty:
+                    latest_symbol_timestamp = close_series.index[-1]
+                    if self._is_stale_bar(latest_symbol_timestamp, latest_batch_timestamp, max_staleness):
+                        continue
                     prices[symbol] = float(close_series.iloc[-1])
             except Exception:
                 continue
         return prices
+
+    def _latest_timestamp(self, history: pd.DataFrame) -> pd.Timestamp | None:
+        if history.empty or len(history.index) == 0:
+            return None
+        try:
+            return pd.Timestamp(history.index.max())
+        except Exception:
+            return None
+
+    def _max_bar_staleness(self) -> pd.Timedelta:
+        try:
+            interval = pd.Timedelta(settings.intraday_interval)
+        except ValueError:
+            interval = pd.Timedelta(minutes=15)
+        return max(interval * 3, pd.Timedelta(minutes=30))
+
+    def _is_stale_bar(
+        self,
+        bar_timestamp: object,
+        latest_batch_timestamp: pd.Timestamp | None,
+        max_staleness: pd.Timedelta,
+    ) -> bool:
+        if latest_batch_timestamp is None:
+            return False
+        try:
+            latest_symbol_timestamp = pd.Timestamp(bar_timestamp)
+            latest_timestamp = pd.Timestamp(latest_batch_timestamp)
+            if latest_symbol_timestamp.tzinfo is None and latest_timestamp.tzinfo is not None:
+                latest_symbol_timestamp = latest_symbol_timestamp.tz_localize(latest_timestamp.tzinfo)
+            elif latest_symbol_timestamp.tzinfo is not None and latest_timestamp.tzinfo is None:
+                latest_timestamp = latest_timestamp.tz_localize(latest_symbol_timestamp.tzinfo)
+            return latest_timestamp - latest_symbol_timestamp > max_staleness
+        except Exception:
+            return False
 
     def _fetch_alpaca_latest_prices(self, symbols: list[str]) -> dict[str, float]:
         if not self._alpaca_client or not StockLatestBarRequest:
