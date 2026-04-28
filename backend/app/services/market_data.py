@@ -80,6 +80,8 @@ class MarketDataService:
         multi_symbol = isinstance(history.columns, pd.MultiIndex)
         latest_batch_timestamp = self._latest_timestamp(history)
         max_staleness = self._max_bar_staleness()
+        if self._is_stale_bar(latest_batch_timestamp, pd.Timestamp(self._now()), max_staleness):
+            return prices
         for symbol in symbols:
             try:
                 if multi_symbol:
@@ -99,6 +101,9 @@ class MarketDataService:
 
     def _is_valid_price(self, price: float) -> bool:
         return math.isfinite(price) and price > 0.0
+
+    def _now(self) -> datetime:
+        return datetime.now(timezone.utc)
 
     def _latest_timestamp(self, history: pd.DataFrame) -> pd.Timestamp | None:
         if history.empty or len(history.index) == 0:
