@@ -107,17 +107,23 @@ export default function App() {
   }
 
   const chartPerformance = performance.filter((pt) => isRegularTradingHours(pt.timestamp));
+  const chartPerformanceWithBenchmark = chartPerformance.filter((pt) => pt.spy_price && pt.spy_price > 0);
   const initialEquity = chartPerformance[0]?.equity || performance[0]?.equity || 1000000;
-  const initialSpy = chartPerformance.find(pt => pt.spy_price && pt.spy_price > 0)?.spy_price || 1;
+  const initialSpy = chartPerformanceWithBenchmark[0]?.spy_price || 1;
+  let lastSpy = initialSpy;
 
-  const chartData = chartPerformance.map((pt) => ({
-    ...pt,
-    timestampMs: new Date(pt.timestamp).getTime(),
-    fullDate: format(new Date(pt.timestamp), 'MMM d, yyyy HH:mm'),
-    spyNormalized: (pt.spy_price && pt.spy_price > 0 && showBenchmark) 
-      ? (pt.spy_price / initialSpy) * initialEquity 
-      : null,
-  }));
+  const chartData = chartPerformance.map((pt) => {
+    if (pt.spy_price && pt.spy_price > 0) {
+      lastSpy = pt.spy_price;
+    }
+
+    return {
+      ...pt,
+      timestampMs: new Date(pt.timestamp).getTime(),
+      fullDate: format(new Date(pt.timestamp), 'MMM d, yyyy HH:mm'),
+      spyNormalized: showBenchmark ? (lastSpy / initialSpy) * initialEquity : null,
+    };
+  });
 
   const dayTicks: number[] = [];
   const seenDays = new Set<string>();
@@ -295,6 +301,7 @@ export default function App() {
                           strokeWidth={1.5}
                           strokeDasharray="4 4"
                           fill="none"
+                          connectNulls
                           isAnimationActive={false}
                         />
                       )}
