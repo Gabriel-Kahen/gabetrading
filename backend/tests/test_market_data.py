@@ -49,6 +49,7 @@ def test_extract_latest_prices_accepts_recent_symbol_bar(monkeypatch):
 
 def test_fetch_snapshot_does_not_execute_from_daily_fallback(monkeypatch):
     service = MarketDataService()
+    service._alpaca_client = None
     daily_history = pd.concat(
         {
             "AMD": pd.DataFrame({"Close": [305.33]}, index=pd.to_datetime(["2026-04-23"])),
