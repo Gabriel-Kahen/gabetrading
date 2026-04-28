@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import math
 
 import pandas as pd
 import yfinance as yf
@@ -45,10 +46,8 @@ class MarketDataService:
         )
 
         prices = self._extract_latest_prices(symbols, intraday_history)
-        if not prices:
-            prices = self._extract_latest_prices(symbols, history)
         if self._alpaca_client:
-            prices.update(self._fetch_alpaca_latest_prices(symbols))
+            prices.update(self._fetch_alpaca_latest_prices(symbols, self._latest_timestamp(intraday_history)))
 
         return MarketSnapshot(prices=prices, history=history, intraday_history=intraday_history)
 
@@ -91,10 +90,15 @@ class MarketDataService:
                     latest_symbol_timestamp = close_series.index[-1]
                     if self._is_stale_bar(latest_symbol_timestamp, latest_batch_timestamp, max_staleness):
                         continue
-                    prices[symbol] = float(close_series.iloc[-1])
+                    price = float(close_series.iloc[-1])
+                    if self._is_valid_price(price):
+                        prices[symbol] = price
             except Exception:
                 continue
         return prices
+
+    def _is_valid_price(self, price: float) -> bool:
+        return math.isfinite(price) and price > 0.0
 
     def _latest_timestamp(self, history: pd.DataFrame) -> pd.Timestamp | None:
         if history.empty or len(history.index) == 0:
@@ -130,17 +134,31 @@ class MarketDataService:
         except Exception:
             return False
 
-    def _fetch_alpaca_latest_prices(self, symbols: list[str]) -> dict[str, float]:
+    def _fetch_alpaca_latest_prices(
+        self,
+        symbols: list[str],
+        latest_batch_timestamp: pd.Timestamp | None = None,
+    ) -> dict[str, float]:
         if not self._alpaca_client or not StockLatestBarRequest:
             return {}
         try:
             request = StockLatestBarRequest(symbol_or_symbols=symbols)
             bars = self._alpaca_client.get_stock_latest_bar(request)
-            return {
-                symbol: float(bar.close)
-                for symbol, bar in bars.items()
-                if getattr(bar, "close", None) is not None
-            }
+            prices: dict[str, float] = {}
+            comparison_timestamp = latest_batch_timestamp or pd.Timestamp(datetime.now(timezone.utc))
+            max_staleness = self._max_bar_staleness()
+            for symbol, bar in bars.items():
+                price = getattr(bar, "close", None)
+                timestamp = getattr(bar, "timestamp", None)
+                if price is None or timestamp is None:
+                    continue
+                price = float(price)
+                if not self._is_valid_price(price):
+                    continue
+                if self._is_stale_bar(timestamp, comparison_timestamp, max_staleness):
+                    continue
+                prices[symbol] = price
+            return prices
         except Exception:
             return {}
 
