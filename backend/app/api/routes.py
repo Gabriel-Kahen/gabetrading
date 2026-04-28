@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter
 
 from app.services.trader import TradingOrchestrator
@@ -37,8 +39,8 @@ def build_router(orchestrator: TradingOrchestrator) -> APIRouter:
         return orchestrator.portfolio.get_last_signals()
 
     @router.post("/cycle/run")
-    def run_cycle():
-        portfolio, signals = orchestrator.run_cycle()
+    async def run_cycle():
+        portfolio, signals = await asyncio.to_thread(orchestrator.run_cycle)
         return {
             "portfolio": portfolio,
             "signals": signals[:25],

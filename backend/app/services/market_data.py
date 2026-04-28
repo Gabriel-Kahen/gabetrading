@@ -33,7 +33,7 @@ class MarketDataService:
 
     def fetch_snapshot(self, symbols: list[str]) -> MarketSnapshot:
         history = self._daily_history(symbols)
-        intraday_history = yf.download(
+        intraday_history = _download_prices(
             tickers=symbols,
             period=f"{settings.intraday_lookback_days}d",
             interval=settings.intraday_interval,
@@ -59,7 +59,7 @@ class MarketDataService:
 
         period_days = max(settings.lookback_days + 20, 120)
         start = now - timedelta(days=period_days)
-        history = yf.download(
+        history = _download_prices(
             tickers=symbols,
             start=start.date().isoformat(),
             end=now.date().isoformat(),
@@ -104,6 +104,11 @@ class MarketDataService:
             }
         except Exception:
             return {}
+
+
+def _download_prices(**kwargs) -> pd.DataFrame:
+    kwargs["threads"] = False
+    return yf.download(**kwargs)
 
 
 def symbol_history_frame(history: pd.DataFrame, symbol: str) -> pd.DataFrame:
