@@ -3,6 +3,15 @@ import pandas as pd
 from app.services.market_data import MarketDataService
 
 
+class FakeAlerts:
+    def __init__(self):
+        self.calls = []
+
+    def send(self, title, message, *, key=None):
+        self.calls.append((title, message, key))
+        return True
+
+
 def _set_now(service: MarketDataService, value: str):
     service._now = lambda: pd.Timestamp(value).to_pydatetime()
 
@@ -55,7 +64,8 @@ def test_extract_latest_prices_accepts_recent_symbol_bar(monkeypatch):
 
 def test_extract_latest_prices_skips_stale_batch(monkeypatch):
     monkeypatch.setattr("app.config.settings.intraday_interval", "15m")
-    service = MarketDataService()
+    alerts = FakeAlerts()
+    service = MarketDataService(alert_service=alerts)
     _set_now(service, "2026-04-24 16:00:00+00:00")
     index = pd.to_datetime(["2026-04-24 14:00:00+00:00"])
     history = pd.concat(
@@ -69,6 +79,7 @@ def test_extract_latest_prices_skips_stale_batch(monkeypatch):
     prices = service._extract_latest_prices(["AMD", "MSFT"], history)
 
     assert prices == {}
+    assert alerts.calls[0][2] == "market-data:stale-batch"
 
 
 def test_fetch_snapshot_does_not_execute_from_daily_fallback(monkeypatch):

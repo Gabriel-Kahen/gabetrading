@@ -8,6 +8,7 @@ import requests
 from zoneinfo import ZoneInfo
 
 from app.config import settings
+from app.services.alerts import AlertService
 from app.services.trader import TradingOrchestrator
 
 
@@ -40,6 +41,7 @@ def _is_market_open() -> bool:
 class RuntimeService:
     def __init__(self, orchestrator: TradingOrchestrator) -> None:
         self.orchestrator = orchestrator
+        self._alerts = AlertService()
         self._task: asyncio.Task | None = None
 
     async def start(self) -> None:
@@ -78,5 +80,10 @@ class RuntimeService:
                     logger.info("Market is currently closed. Skipping trading cycle.")
                     return
             await asyncio.to_thread(self.orchestrator.run_cycle)
-        except Exception:
+        except Exception as exc:
             logger.exception("trading cycle failed")
+            self._alerts.send(
+                "Trading cycle failed",
+                f"{type(exc).__name__}: {exc}",
+                key="runtime:cycle-failed",
+            )

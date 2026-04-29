@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     enable_trade_explanations: bool = True
     groq_api_key: str | None = None
     groq_model: str = "llama-3.1-8b-instant"
+    discord_webhook_url: str | None = None
+    alert_cooldown_seconds: int = 900
+    anomaly_return_threshold_pct: float = 5.0
+    anomaly_duration_minutes: int = 60
 
     @property
     def state_file(self) -> Path:

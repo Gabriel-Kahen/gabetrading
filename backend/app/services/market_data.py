@@ -8,6 +8,7 @@ import pandas as pd
 import yfinance as yf
 
 from app.config import settings
+from app.services.alerts import AlertService
 
 try:
     from alpaca.data.historical import StockHistoricalDataClient
@@ -25,8 +26,9 @@ class MarketSnapshot:
 
 
 class MarketDataService:
-    def __init__(self) -> None:
+    def __init__(self, alert_service: AlertService | None = None) -> None:
         self._alpaca_client = None
+        self._alerts = alert_service or AlertService()
         self._cached_daily_history = pd.DataFrame()
         self._daily_history_expires_at: datetime | None = None
         if settings.alpaca_api_key and settings.alpaca_secret_key and StockHistoricalDataClient:
@@ -48,6 +50,12 @@ class MarketDataService:
         prices = self._extract_latest_prices(symbols, intraday_history)
         if self._alpaca_client:
             prices.update(self._fetch_alpaca_latest_prices(symbols, self._latest_timestamp(intraday_history)))
+        if not prices:
+            self._alerts.send(
+                "No executable market prices",
+                f"No valid current prices were available for {len(symbols)} requested symbols.",
+                key="market-data:no-prices",
+            )
 
         return MarketSnapshot(prices=prices, history=history, intraday_history=intraday_history)
 
@@ -81,6 +89,11 @@ class MarketDataService:
         latest_batch_timestamp = self._latest_timestamp(history)
         max_staleness = self._max_bar_staleness()
         if self._is_stale_bar(latest_batch_timestamp, pd.Timestamp(self._now()), max_staleness):
+            self._alerts.send(
+                "Stale intraday market-data batch",
+                f"Latest batch timestamp {latest_batch_timestamp} is stale relative to current time.",
+                key="market-data:stale-batch",
+            )
             return prices
         for symbol in symbols:
             try:
