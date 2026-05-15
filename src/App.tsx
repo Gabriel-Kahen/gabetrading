@@ -16,6 +16,15 @@ const MOBILE_EXECUTION_PAGE_SIZE = 25;
 const CLOSED_POSITIONS_PAGE_SIZE = 10;
 
 type ClosedPositionSort = 'gainCash' | 'lossCash' | 'gainPercent' | 'lossPercent';
+type ChartRange = '1D' | '1W' | '1M' | '3M' | 'ALL';
+
+const CHART_RANGES: Array<{ label: ChartRange; durationMs: number | null }> = [
+  { label: '1D', durationMs: 24 * 60 * 60 * 1000 },
+  { label: '1W', durationMs: 7 * 24 * 60 * 60 * 1000 },
+  { label: '1M', durationMs: 30 * 24 * 60 * 60 * 1000 },
+  { label: '3M', durationMs: 90 * 24 * 60 * 60 * 1000 },
+  { label: 'ALL', durationMs: null },
+];
 
 function formatCurrency(val: number) {
   return new Intl.NumberFormat('en-US', {
@@ -57,6 +66,7 @@ export default function App() {
 
   const [showBenchmark, setShowBenchmark] = useState(false);
   const [showExecutionLog, setShowExecutionLog] = useState(false);
+  const [chartRange, setChartRange] = useState<ChartRange>('ALL');
   const [mobileExecutionPage, setMobileExecutionPage] = useState(1);
   const [closedPositionSort, setClosedPositionSort] = useState<ClosedPositionSort>('gainPercent');
   const [closedPositionsPage, setClosedPositionsPage] = useState(1);
@@ -106,7 +116,14 @@ export default function App() {
     );
   }
 
-  const chartPerformance = performance.filter((pt) => isRegularTradingHours(pt.timestamp));
+  const regularHoursPerformance = performance.filter((pt) => isRegularTradingHours(pt.timestamp));
+  const selectedRange = CHART_RANGES.find((range) => range.label === chartRange) ?? CHART_RANGES[CHART_RANGES.length - 1];
+  const latestChartTimestamp = regularHoursPerformance.at(-1)
+    ? new Date(regularHoursPerformance.at(-1)!.timestamp).getTime()
+    : 0;
+  const chartPerformance = selectedRange.durationMs && latestChartTimestamp
+    ? regularHoursPerformance.filter((pt) => new Date(pt.timestamp).getTime() >= latestChartTimestamp - selectedRange.durationMs!)
+    : regularHoursPerformance;
   const chartPerformanceWithBenchmark = chartPerformance.filter((pt) => pt.spy_price && pt.spy_price > 0);
   const initialEquity = chartPerformance[0]?.equity || performance[0]?.equity || 1000000;
   const initialSpy = chartPerformanceWithBenchmark[0]?.spy_price || 1;
@@ -125,28 +142,21 @@ export default function App() {
     };
   });
 
-  const dayTicks: number[] = [];
-  const seenDays = new Set<string>();
-  
-  chartData.forEach((pt) => {
-    const dayStr = format(new Date(pt.timestamp), 'yyyy-MM-dd');
-    if (!seenDays.has(dayStr)) {
-      seenDays.add(dayStr);
-      dayTicks.push(pt.timestampMs); // Use actual data timestamp for categorical ticks
-    }
-  });
-
-  const tickStep = Math.max(1, Math.ceil(dayTicks.length / 6));
-  const xAxisTicks = dayTicks.filter((_, index) => index % tickStep === 0);
-  const lastTick = dayTicks[dayTicks.length - 1];
-
+  const desiredTickCount = 6;
+  const tickStep = Math.max(1, Math.ceil(chartData.length / desiredTickCount));
+  const xAxisTicks = chartData
+    .filter((_, index) => index % tickStep === 0)
+    .map((pt) => pt.timestampMs);
+  const lastTick = chartData.at(-1)?.timestampMs;
   if (lastTick !== undefined && !xAxisTicks.includes(lastTick)) {
     xAxisTicks.push(lastTick);
   }
-
   const spansMultipleYears = new Set(
     chartData.map((pt) => new Date(pt.timestamp).getFullYear())
   ).size > 1;
+  const spansMultipleDays = chartData.length > 0 && (
+    format(new Date(chartData[0].timestamp), 'yyyy-MM-dd') !== format(new Date(chartData.at(-1)!.timestamp), 'yyyy-MM-dd')
+  );
   const mobileExecutionPageCount = Math.max(1, Math.ceil(trades.length / MOBILE_EXECUTION_PAGE_SIZE));
   const currentMobileExecutionPage = Math.min(mobileExecutionPage, mobileExecutionPageCount);
   const mobileExecutionTrades = trades.slice(
@@ -221,25 +231,41 @@ export default function App() {
             
             {/* Chart Container */}
             <div className="bg-[#121212] border border-[#262626] p-5 rounded-sm shrink-0">
-              <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="mb-6 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
                 <h2 className="text-sm font-mono text-[#a3a3a3] uppercase tracking-wider">Performance Curve</h2>
-                <label className="flex items-center cursor-pointer group">
-                  <div className="relative">
-                    <input 
-                      type="checkbox" 
-                      className="sr-only" 
-                      checked={showBenchmark} 
-                      onChange={() => setShowBenchmark(!showBenchmark)} 
-                    />
-                    <div className={`block w-8 h-4 rounded-full transition-colors ${showBenchmark ? 'bg-[#3b82f6]' : 'bg-[#262626]'}`}></div>
-                    <div className={`dot absolute left-1 top-1 bg-[#a3a3a3] group-hover:bg-[#ededed] w-2 h-2 rounded-full transition-transform ${showBenchmark ? 'transform translate-x-4 bg-white' : ''}`}></div>
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
+                  <div className="grid grid-cols-5 overflow-hidden rounded-sm border border-[#262626] bg-[#0f0f0f] font-mono text-[10px] uppercase tracking-wider text-[#737373]">
+                    {CHART_RANGES.map((range) => (
+                      <button
+                        key={range.label}
+                        type="button"
+                        onClick={() => setChartRange(range.label)}
+                        className={`px-3 py-2 transition-colors hover:bg-[#171717] hover:text-[#d4d4d4] ${
+                          chartRange === range.label ? 'bg-[#1f2937] text-[#ededed]' : ''
+                        }`}
+                      >
+                        {range.label}
+                      </button>
+                    ))}
                   </div>
-                  <div className="ml-3 text-[10px] uppercase tracking-wider font-mono text-[#737373] group-hover:text-[#a3a3a3] transition-colors">
-                    S&P 500 OVERLAY
-                  </div>
-                </label>
+                  <label className="flex items-center cursor-pointer group">
+                    <div className="relative">
+                      <input 
+                        type="checkbox" 
+                        className="sr-only" 
+                        checked={showBenchmark} 
+                        onChange={() => setShowBenchmark(!showBenchmark)} 
+                      />
+                      <div className={`block w-8 h-4 rounded-full transition-colors ${showBenchmark ? 'bg-[#3b82f6]' : 'bg-[#262626]'}`}></div>
+                      <div className={`dot absolute left-1 top-1 bg-[#a3a3a3] group-hover:bg-[#ededed] w-2 h-2 rounded-full transition-transform ${showBenchmark ? 'transform translate-x-4 bg-white' : ''}`}></div>
+                    </div>
+                    <div className="ml-3 text-[10px] uppercase tracking-wider font-mono text-[#737373] group-hover:text-[#a3a3a3] transition-colors">
+                      S&P 500 OVERLAY
+                    </div>
+                  </label>
+                </div>
               </div>
-              <div className="h-[360px] w-full">
+              <div className="h-[360px] min-w-0 w-full">
                 {chartData.length > 0 ? (
                   <ResponsiveContainer width="100%" height="100%">
                       <AreaChart data={chartData} margin={{ top: 5, right: 5, left: -20, bottom: 25 }}>
@@ -252,12 +278,15 @@ export default function App() {
                       <CartesianGrid strokeDasharray="2 4" stroke="#262626" vertical={false} />
                       <XAxis 
                         dataKey="timestampMs"
+                        type="number"
+                        scale="time"
+                        domain={['dataMin', 'dataMax']}
                         ticks={xAxisTicks}
                         stroke="#525252" 
                         fontSize={11} 
                         fontFamily="monospace"
                         tickFormatter={(value) =>
-                          format(new Date(value), spansMultipleYears ? 'MMM d, yy' : 'MMM d')
+                          format(new Date(value), spansMultipleYears ? 'MMM d, yy' : spansMultipleDays ? 'MMM d' : 'HH:mm')
                         }
                         tickLine={false}
                         axisLine={false}

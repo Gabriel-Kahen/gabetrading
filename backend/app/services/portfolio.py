@@ -218,8 +218,8 @@ class PortfolioService:
                 spy_price=prices.get("SPY", 0.0),
             )
         )
-        self._state.equity_curve = self._state.equity_curve[-1000:]
-        self._state.trades = self._state.trades[-5000:]
+        self._state.equity_curve = self._state.equity_curve[-settings.equity_curve_limit :]
+        self._state.trades = self._state.trades[-settings.trade_history_limit :]
 
     def _build_closed_positions(self) -> list[ClosedPosition]:
         lots_by_symbol: dict[str, list[dict]] = {}

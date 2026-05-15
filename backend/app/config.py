@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     short_score_threshold: float = -0.15
     min_rebalance_notional: float = 15_000.0
     min_rebalance_weight_change: float = 0.01
+    equity_curve_limit: int = 20_000
+    trade_history_limit: int = 5_000
     auto_run_on_start: bool = True
     data_dir: Path = Path("data")
     state_file_name: str = "state.json"
