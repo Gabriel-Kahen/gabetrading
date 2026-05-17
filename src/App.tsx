@@ -17,6 +17,11 @@ const CLOSED_POSITIONS_PAGE_SIZE = 10;
 
 type ClosedPositionSort = 'gainCash' | 'lossCash' | 'gainPercent' | 'lossPercent';
 type ChartRange = '1D' | '1W' | '1M' | '3M' | 'ALL';
+type ChartPoint = EquityPoint & {
+  timestampMs: number;
+  fullDate: string;
+  spyNormalized: number | null;
+};
 
 const CHART_RANGES: Array<{ label: ChartRange; durationMs: number | null }> = [
   { label: '1D', durationMs: 24 * 60 * 60 * 1000 },
@@ -25,6 +30,8 @@ const CHART_RANGES: Array<{ label: ChartRange; durationMs: number | null }> = [
   { label: '3M', durationMs: 90 * 24 * 60 * 60 * 1000 },
   { label: 'ALL', durationMs: null },
 ];
+
+const MARKET_GAP_BREAK_MS = 90 * 60 * 1000;
 
 function formatCurrency(val: number) {
   return new Intl.NumberFormat('en-US', {
@@ -129,7 +136,7 @@ export default function App() {
   const initialSpy = chartPerformanceWithBenchmark[0]?.spy_price || 1;
   let lastSpy = initialSpy;
 
-  const chartData = chartPerformance.map((pt) => {
+  const chartData: ChartPoint[] = chartPerformance.map((pt) => {
     if (pt.spy_price && pt.spy_price > 0) {
       lastSpy = pt.spy_price;
     }
@@ -140,6 +147,28 @@ export default function App() {
       fullDate: format(new Date(pt.timestamp), 'MMM d, yyyy HH:mm'),
       spyNormalized: showBenchmark ? (lastSpy / initialSpy) * initialEquity : null,
     };
+  });
+  const plottedChartData = chartData.flatMap((pt, index) => {
+    const previous = chartData[index - 1];
+    if (!previous || pt.timestampMs - previous.timestampMs <= MARKET_GAP_BREAK_MS) {
+      return [pt];
+    }
+
+    return [
+      {
+        ...previous,
+        timestampMs: previous.timestampMs + 1,
+        equity: null,
+        spyNormalized: null,
+      },
+      {
+        ...pt,
+        timestampMs: pt.timestampMs - 1,
+        equity: null,
+        spyNormalized: null,
+      },
+      pt,
+    ];
   });
 
   const desiredTickCount = 6;
@@ -268,7 +297,7 @@ export default function App() {
               <div className="h-[360px] min-w-0 w-full">
                 {chartData.length > 0 ? (
                   <ResponsiveContainer width="100%" height="100%">
-                      <AreaChart data={chartData} margin={{ top: 5, right: 5, left: -20, bottom: 25 }}>
+                      <AreaChart data={plottedChartData} margin={{ top: 5, right: 5, left: -20, bottom: 25 }}>
                       <defs>
                         <linearGradient id="colorEquity" x1="0" y1="0" x2="0" y2="1">
                           <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.3}/>
@@ -330,7 +359,6 @@ export default function App() {
                           strokeWidth={1.5}
                           strokeDasharray="4 4"
                           fill="none"
-                          connectNulls
                           isAnimationActive={false}
                         />
                       )}
