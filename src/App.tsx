@@ -19,6 +19,7 @@ type ClosedPositionSort = 'gainCash' | 'lossCash' | 'gainPercent' | 'lossPercent
 type ChartRange = '1D' | '1W' | '1M' | '3M' | 'ALL';
 type ChartPoint = EquityPoint & {
   timestampMs: number;
+  tradingIndex: number;
   fullDate: string;
   spyNormalized: number | null;
 };
@@ -30,8 +31,6 @@ const CHART_RANGES: Array<{ label: ChartRange; durationMs: number | null }> = [
   { label: '3M', durationMs: 90 * 24 * 60 * 60 * 1000 },
   { label: 'ALL', durationMs: null },
 ];
-
-const MARKET_GAP_BREAK_MS = 90 * 60 * 1000;
 
 function formatCurrency(val: number) {
   return new Intl.NumberFormat('en-US', {
@@ -136,7 +135,7 @@ export default function App() {
   const initialSpy = chartPerformanceWithBenchmark[0]?.spy_price || 1;
   let lastSpy = initialSpy;
 
-  const chartData: ChartPoint[] = chartPerformance.map((pt) => {
+  const chartData: ChartPoint[] = chartPerformance.map((pt, index) => {
     if (pt.spy_price && pt.spy_price > 0) {
       lastSpy = pt.spy_price;
     }
@@ -144,42 +143,22 @@ export default function App() {
     return {
       ...pt,
       timestampMs: new Date(pt.timestamp).getTime(),
+      tradingIndex: index,
       fullDate: format(new Date(pt.timestamp), 'MMM d, yyyy HH:mm'),
       spyNormalized: showBenchmark ? (lastSpy / initialSpy) * initialEquity : null,
     };
-  });
-  const plottedChartData = chartData.flatMap((pt, index) => {
-    const previous = chartData[index - 1];
-    if (!previous || pt.timestampMs - previous.timestampMs <= MARKET_GAP_BREAK_MS) {
-      return [pt];
-    }
-
-    return [
-      {
-        ...previous,
-        timestampMs: previous.timestampMs + 1,
-        equity: null,
-        spyNormalized: null,
-      },
-      {
-        ...pt,
-        timestampMs: pt.timestampMs - 1,
-        equity: null,
-        spyNormalized: null,
-      },
-      pt,
-    ];
   });
 
   const desiredTickCount = 6;
   const tickStep = Math.max(1, Math.ceil(chartData.length / desiredTickCount));
   const xAxisTicks = chartData
     .filter((_, index) => index % tickStep === 0)
-    .map((pt) => pt.timestampMs);
-  const lastTick = chartData.at(-1)?.timestampMs;
+    .map((pt) => pt.tradingIndex);
+  const lastTick = chartData.at(-1)?.tradingIndex;
   if (lastTick !== undefined && !xAxisTicks.includes(lastTick)) {
     xAxisTicks.push(lastTick);
   }
+  const chartPointsByIndex = new Map(chartData.map((pt) => [pt.tradingIndex, pt]));
   const spansMultipleYears = new Set(
     chartData.map((pt) => new Date(pt.timestamp).getFullYear())
   ).size > 1;
@@ -297,7 +276,7 @@ export default function App() {
               <div className="h-[360px] min-w-0 w-full">
                 {chartData.length > 0 ? (
                   <ResponsiveContainer width="100%" height="100%">
-                      <AreaChart data={plottedChartData} margin={{ top: 5, right: 5, left: -20, bottom: 25 }}>
+                      <AreaChart data={chartData} margin={{ top: 5, right: 5, left: -20, bottom: 25 }}>
                       <defs>
                         <linearGradient id="colorEquity" x1="0" y1="0" x2="0" y2="1">
                           <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.3}/>
@@ -306,17 +285,20 @@ export default function App() {
                       </defs>
                       <CartesianGrid strokeDasharray="2 4" stroke="#262626" vertical={false} />
                       <XAxis 
-                        dataKey="timestampMs"
+                        dataKey="tradingIndex"
                         type="number"
-                        scale="time"
                         domain={['dataMin', 'dataMax']}
                         ticks={xAxisTicks}
                         stroke="#525252" 
                         fontSize={11} 
                         fontFamily="monospace"
-                        tickFormatter={(value) =>
-                          format(new Date(value), spansMultipleYears ? 'MMM d, yy' : spansMultipleDays ? 'MMM d' : 'HH:mm')
-                        }
+                        tickFormatter={(value) => {
+                          const point = chartPointsByIndex.get(Number(value));
+                          if (!point) {
+                            return '';
+                          }
+                          return format(new Date(point.timestamp), spansMultipleYears ? 'MMM d, yy' : spansMultipleDays ? 'MMM d' : 'HH:mm');
+                        }}
                         tickLine={false}
                         axisLine={false}
                         dy={15}
