@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
-from pathlib import Path
 from threading import Lock
 
 from app.config import settings
-from app.models.schemas import ClosedPosition, EngineState, EquityPoint, PortfolioSnapshot, Position, Signal, Trade
+from app.models.schemas import ClosedPosition, EquityPoint, PortfolioSnapshot, Position, Signal, Trade
 from app.services.explanations import TradeExplanationService
+from app.services.portfolio_store import PortfolioStore
 
 
 class PortfolioService:
@@ -15,7 +14,8 @@ class PortfolioService:
         self._lock = Lock()
         self._explanation_service = explanation_service or TradeExplanationService()
         settings.data_dir.mkdir(parents=True, exist_ok=True)
-        self._state = self._load_or_initialize(settings.state_file)
+        self._store = PortfolioStore(settings.database_file, settings.state_file)
+        self._state = self._store.load_or_initialize()
 
     def get_snapshot(self, prices: dict[str, float] | None = None) -> PortfolioSnapshot:
         with self._lock:
@@ -72,7 +72,7 @@ class PortfolioService:
             self._state.last_signals = signals[:50]
             self._record_equity_point(prices)
             self._state.updated_at = datetime.now(timezone.utc)
-            self._persist(settings.state_file)
+            self._store.save(self._state)
             return self._build_snapshot(prices)
 
     def _should_skip_rebalance(self, symbol: str, target_value: float, price: float, equity: float) -> bool:
@@ -218,8 +218,6 @@ class PortfolioService:
                 spy_price=prices.get("SPY", 0.0),
             )
         )
-        self._state.equity_curve = self._state.equity_curve[-settings.equity_curve_limit :]
-        self._state.trades = self._state.trades[-settings.trade_history_limit :]
 
     def _build_closed_positions(self) -> list[ClosedPosition]:
         lots_by_symbol: dict[str, list[dict]] = {}
@@ -322,24 +320,3 @@ class PortfolioService:
             "exit_notional": 0.0,
             "realized_pnl": 0.0,
         }
-
-    def _load_or_initialize(self, path: Path) -> EngineState:
-        if path.exists():
-            payload = json.loads(path.read_text())
-            return EngineState.model_validate(payload)
-        now = datetime.now(timezone.utc)
-        state = EngineState(
-            initialized_at=now,
-            updated_at=now,
-            cash=settings.starting_capital,
-            positions={},
-            trades=[],
-            equity_curve=[],
-            last_signals=[],
-        )
-        self._persist(path, state)
-        return state
-
-    def _persist(self, path: Path, state: EngineState | None = None) -> None:
-        target_state = state or self._state
-        path.write_text(target_state.model_dump_json(indent=2))

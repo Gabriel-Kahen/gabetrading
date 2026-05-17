@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     app_name: str = "Live Paper Trading Backend"
-    starting_capital: float = 1_000_000.0
+    starting_capital: float = 100_000.0
     trading_interval_seconds: int = 60
     market_closed_poll_seconds: int = 300
     news_refresh_seconds: int = 300
@@ -26,11 +26,10 @@ class Settings(BaseSettings):
     short_score_threshold: float = -0.15
     min_rebalance_notional: float = 15_000.0
     min_rebalance_weight_change: float = 0.01
-    equity_curve_limit: int = 20_000
-    trade_history_limit: int = 5_000
     auto_run_on_start: bool = True
     data_dir: Path = Path("data")
     state_file_name: str = "state.json"
+    database_file_name: str = "state.sqlite3"
     alpaca_api_key: str | None = None
     alpaca_secret_key: str | None = None
     alpaca_base_url: str | None = None
@@ -45,6 +44,10 @@ class Settings(BaseSettings):
     @property
     def state_file(self) -> Path:
         return self.data_dir / self.state_file_name
+
+    @property
+    def database_file(self) -> Path:
+        return self.data_dir / self.database_file_name
 
 
 settings = Settings()

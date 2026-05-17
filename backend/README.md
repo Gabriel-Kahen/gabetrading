@@ -2,7 +2,7 @@
 
 FastAPI backend for a live paper-trading simulator that:
 
-- starts with `$1,000,000` in virtual capital
+- starts with `$100,000` in virtual capital
 - trades only names from the S&P 500 universe
 - combines market signals and news sentiment
 - simulates buys, sells, and shorts at current market prices
@@ -56,6 +56,9 @@ Optional environment variables:
 - `DATA_DIR=./data`
 
 Trade explanations use Groq through its OpenAI-compatible API when `GROQ_API_KEY` is available.
+
+Runtime portfolio state is stored in `DATA_DIR/state.sqlite3`. If a legacy `state.json` exists and SQLite has
+not been initialized yet, the backend imports it once and rebases the first equity point to `$100,000`.
 
 ## Important endpoints
 

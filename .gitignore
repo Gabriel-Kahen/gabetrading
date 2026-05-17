@@ -25,3 +25,6 @@ gabejaytrading/build
 *.sw?
 backend/.venv
 backend/data/state.json
+backend/data/*.sqlite*
+__pycache__/
+*.py[cod]
