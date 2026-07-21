@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from threading import Lock
 
 from app.config import settings
@@ -16,6 +16,8 @@ class PortfolioService:
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         self._store = PortfolioStore(settings.database_file, settings.state_file)
         self._state = self._store.load_or_initialize()
+        self._closed_positions_cache_trade_count = -1
+        self._closed_positions_cache: list[ClosedPosition] = []
 
     def get_snapshot(self, prices: dict[str, float] | None = None) -> PortfolioSnapshot:
         with self._lock:
@@ -25,17 +27,62 @@ class PortfolioService:
         with self._lock:
             return self._build_positions(prices or {})
 
-    def get_trades(self) -> list[Trade]:
+    def get_trades(self, limit: int | None = None) -> list[Trade]:
         with self._lock:
-            return list(reversed(self._state.trades))
+            if limit is None:
+                return list(reversed(self._state.trades))
+            return list(reversed(self._state.trades[-limit:]))
 
     def get_closed_positions(self) -> list[ClosedPosition]:
         with self._lock:
-            return self._build_closed_positions()
+            return list(self._get_cached_closed_positions())
 
-    def get_equity_curve(self) -> list[EquityPoint]:
+    def get_closed_positions_page(
+        self,
+        sort: str,
+        page: int,
+        page_size: int,
+    ) -> tuple[list[ClosedPosition], int]:
         with self._lock:
-            return self._state.equity_curve
+            closed_positions = list(self._get_cached_closed_positions())
+            sort_options = {
+                "gainCash": (lambda position: position.realized_pnl, True),
+                "lossCash": (lambda position: position.realized_pnl, False),
+                "gainPercent": (lambda position: position.realized_return_pct, True),
+                "lossPercent": (lambda position: position.realized_return_pct, False),
+            }
+            key, reverse = sort_options[sort]
+            closed_positions.sort(key=key, reverse=reverse)
+            offset = (page - 1) * page_size
+            return closed_positions[offset : offset + page_size], len(closed_positions)
+
+    def get_equity_curve(
+        self,
+        max_points: int | None = None,
+        range_name: str | None = None,
+    ) -> list[EquityPoint]:
+        with self._lock:
+            equity_curve = self._state.equity_curve
+            range_durations = {
+                "1D": timedelta(days=1),
+                "1W": timedelta(days=7),
+                "1M": timedelta(days=30),
+                "3M": timedelta(days=90),
+            }
+            if equity_curve and range_name in range_durations:
+                cutoff = equity_curve[-1].timestamp - range_durations[range_name]
+                equity_curve = [point for point in equity_curve if point.timestamp >= cutoff]
+            if max_points is None or len(equity_curve) <= max_points:
+                return list(equity_curve)
+            if max_points == 1:
+                return [equity_curve[-1]]
+
+            last_index = len(equity_curve) - 1
+            sampled_indices = {
+                round(index * last_index / (max_points - 1))
+                for index in range(max_points)
+            }
+            return [equity_curve[index] for index in sorted(sampled_indices)]
 
     def get_last_signals(self) -> list[Signal]:
         with self._lock:
@@ -298,6 +345,13 @@ class PortfolioService:
                 )
 
         return list(reversed(closed_positions))
+
+    def _get_cached_closed_positions(self) -> list[ClosedPosition]:
+        trade_count = len(self._state.trades)
+        if self._closed_positions_cache_trade_count != trade_count:
+            self._closed_positions_cache = self._build_closed_positions()
+            self._closed_positions_cache_trade_count = trade_count
+        return self._closed_positions_cache
 
     def _start_lifecycle(self, trade: Trade, direction: str) -> dict:
         return {
