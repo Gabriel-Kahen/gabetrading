@@ -1,27 +1,43 @@
-import { useEffect, useState } from 'react';
+import { Component, lazy, Suspense, useEffect, useMemo, useState } from 'react';
+import type { ErrorInfo, ReactNode } from 'react';
 import { format } from 'date-fns';
-import {
-  AreaChart,
-  Area,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-} from 'recharts';
 import type { PortfolioSnapshot, Position, Trade, EquityPoint, ClosedPosition } from './types';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
 const MOBILE_EXECUTION_PAGE_SIZE = 25;
 const CLOSED_POSITIONS_PAGE_SIZE = 10;
+const RECENT_TRADES_LIMIT = 250;
+const PERFORMANCE_POINT_LIMIT = 1500;
+const PRIMARY_REFRESH_INTERVAL_MS = 10_000;
+const HISTORY_REFRESH_INTERVAL_MS = 60_000;
+const REQUEST_TIMEOUT_MS = 15_000;
+
+const PerformanceChart = lazy(() => import('./PerformanceChart'));
 
 type ClosedPositionSort = 'gainCash' | 'lossCash' | 'gainPercent' | 'lossPercent';
 type ChartRange = '1D' | '1W' | '1M' | '3M' | 'ALL';
-type ChartPoint = EquityPoint & {
+export type ChartPoint = EquityPoint & {
   timestampMs: number;
   tradingIndex: number;
   fullDate: string;
   spyNormalized: number | null;
+};
+
+type DataSection = 'portfolio' | 'holdings' | 'trades' | 'performance' | 'closedPositions';
+type LoadStatus = 'loading' | 'ready' | 'stale' | 'error';
+type ClosedPositionsPage = {
+  items: ClosedPosition[];
+  total: number;
+  page: number;
+  page_size: number;
+};
+
+const INITIAL_LOAD_STATUS: Record<DataSection, LoadStatus> = {
+  portfolio: 'loading',
+  holdings: 'loading',
+  trades: 'loading',
+  performance: 'loading',
+  closedPositions: 'loading',
 };
 
 const CHART_RANGES: Array<{ label: ChartRange; durationMs: number | null }> = [
@@ -32,6 +48,14 @@ const CHART_RANGES: Array<{ label: ChartRange; durationMs: number | null }> = [
   { label: 'ALL', durationMs: null },
 ];
 
+const EASTERN_TIME_FORMATTER = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'America/New_York',
+  weekday: 'short',
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false,
+});
+
 function formatCurrency(val: number) {
   return new Intl.NumberFormat('en-US', {
     style: 'currency',
@@ -41,14 +65,35 @@ function formatCurrency(val: number) {
   }).format(val);
 }
 
+async function fetchJson<T>(path: string, signal: AbortSignal): Promise<T> {
+  const requestController = new AbortController();
+  const abortRequest = () => requestController.abort(signal.reason);
+  if (signal.aborted) abortRequest();
+  else signal.addEventListener('abort', abortRequest, { once: true });
+
+  const timeout = window.setTimeout(
+    () => requestController.abort(new DOMException(`${path} timed out`, 'TimeoutError')),
+    REQUEST_TIMEOUT_MS,
+  );
+
+  try {
+    const response = await fetch(`${API_BASE}${path}`, { signal: requestController.signal });
+    if (!response.ok) {
+      throw new Error(`${path} returned ${response.status}`);
+    }
+    return await response.json() as T;
+  } finally {
+    window.clearTimeout(timeout);
+    signal.removeEventListener('abort', abortRequest);
+  }
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof DOMException && error.name === 'AbortError';
+}
+
 function isRegularTradingHours(timestamp: string) {
-  const etParts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York',
-    weekday: 'short',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  }).formatToParts(new Date(timestamp));
+  const etParts = EASTERN_TIME_FORMATTER.formatToParts(new Date(timestamp));
 
   const weekday = etParts.find((part) => part.type === 'weekday')?.value;
   const hour = Number(etParts.find((part) => part.type === 'hour')?.value ?? '0');
@@ -62,13 +107,62 @@ function isRegularTradingHours(timestamp: string) {
   return minutesIntoDay >= 9 * 60 + 30 && minutesIntoDay <= 16 * 60;
 }
 
+function buildChartData(
+  points: EquityPoint[],
+  showBenchmark: boolean,
+  initialSpy: number,
+  initialEquity: number,
+): ChartPoint[] {
+  let latestSpy = initialSpy;
+  return points.map((point, index) => {
+    if (point.spy_price && point.spy_price > 0) latestSpy = point.spy_price;
+    return {
+      ...point,
+      timestampMs: new Date(point.timestamp).getTime(),
+      tradingIndex: index,
+      fullDate: format(new Date(point.timestamp), 'MMM d, yyyy HH:mm'),
+      spyNormalized: showBenchmark ? (latestSpy / initialSpy) * initialEquity : null,
+    };
+  });
+}
+
+function hasUsableData(status: LoadStatus) {
+  return status === 'ready' || status === 'stale';
+}
+
+class ChartErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean }> {
+  state = { hasError: false };
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error('Failed to render performance chart:', error, info);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="flex h-full items-center justify-center font-mono text-sm text-[#525252]">
+          PERFORMANCE CHART UNAVAILABLE
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export default function App() {
   const [portfolio, setPortfolio] = useState<PortfolioSnapshot | null>(null);
   const [holdings, setHoldings] = useState<Position[]>([]);
   const [trades, setTrades] = useState<Trade[]>([]);
   const [closedPositions, setClosedPositions] = useState<ClosedPosition[]>([]);
+  const [closedPositionsTotal, setClosedPositionsTotal] = useState(0);
   const [performance, setPerformance] = useState<EquityPoint[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loadedChartRange, setLoadedChartRange] = useState<ChartRange | null>(null);
+  const [loadStatus, setLoadStatus] = useState(INITIAL_LOAD_STATUS);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
 
   const [showBenchmark, setShowBenchmark] = useState(false);
   const [showExecutionLog, setShowExecutionLog] = useState(false);
@@ -77,52 +171,120 @@ export default function App() {
   const [closedPositionSort, setClosedPositionSort] = useState<ClosedPositionSort>('gainPercent');
   const [closedPositionsPage, setClosedPositionsPage] = useState(1);
 
-  const fetchData = async () => {
-    try {
-      const [pf, h, t, p, c] = await Promise.all([
-        fetch(`${API_BASE}/portfolio`).then((res) => res.json()),
-        fetch(`${API_BASE}/holdings`).then((res) => res.json()),
-        fetch(`${API_BASE}/trades`).then((res) => res.json()),
-        fetch(`${API_BASE}/performance`).then((res) => res.json()),
-        fetch(`${API_BASE}/closed-positions`)
-          .then((res) => (res.ok ? res.json() : []))
-          .catch(() => []),
+  useEffect(() => {
+    let stopped = false;
+    let refreshTimer: number | undefined;
+    let activeController: AbortController | null = null;
+    const loadSection = async <T,>(
+      section: DataSection,
+      path: string,
+      setter: (value: T) => void,
+      signal: AbortSignal,
+    ) => {
+      try {
+        const data = await fetchJson<T>(path, signal);
+        if (stopped) return false;
+        setter(data);
+        setLoadStatus((current) => ({ ...current, [section]: 'ready' }));
+        return true;
+      } catch (error) {
+        if (stopped || isAbortError(error)) return false;
+        console.error(`Failed to load ${section}:`, error);
+        setLoadStatus((current) => ({
+          ...current,
+          [section]: hasUsableData(current[section]) ? 'stale' : 'error',
+        }));
+        return false;
+      }
+    };
+
+    const refresh = async () => {
+      activeController?.abort();
+      activeController = new AbortController();
+      const { signal } = activeController;
+      const results = await Promise.all([
+        loadSection<PortfolioSnapshot>('portfolio', '/portfolio', setPortfolio, signal),
+        loadSection<Position[]>('holdings', '/holdings', setHoldings, signal),
+        loadSection<Trade[]>('trades', `/trades?limit=${RECENT_TRADES_LIMIT}`, setTrades, signal),
+        loadSection<EquityPoint[]>(
+          'performance',
+          `/performance?range=${chartRange}&max_points=${PERFORMANCE_POINT_LIMIT}`,
+          (points) => {
+            setPerformance(points);
+            setLoadedChartRange(chartRange);
+          },
+          signal,
+        ),
       ]);
-      setPortfolio(pf);
-      setHoldings(h);
-      setTrades(t);
-      setPerformance(p);
-      setClosedPositions(c);
-    } catch (err) {
-      console.error('Failed to fetch data:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
+
+      if (stopped) return;
+      if (results.some(Boolean)) setLastUpdatedAt(new Date());
+      if (!document.hidden) {
+        refreshTimer = window.setTimeout(refresh, PRIMARY_REFRESH_INTERVAL_MS);
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
+        activeController?.abort();
+        return;
+      }
+      if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
+      void refresh();
+    };
+
+    void refresh();
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      stopped = true;
+      if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
+      activeController?.abort();
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [chartRange]);
 
   useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 10_000); // 10s auto refresh
-    return () => clearInterval(interval);
-  }, []);
+    const controller = new AbortController();
+    let stopped = false;
+    let refreshTimer: number | undefined;
 
-  useEffect(() => {
-    setMobileExecutionPage(1);
-  }, [showExecutionLog]);
+    const loadClosedPositions = async () => {
+      try {
+        const params = new URLSearchParams({
+          sort: closedPositionSort,
+          page: String(closedPositionsPage),
+          page_size: String(CLOSED_POSITIONS_PAGE_SIZE),
+        });
+        const data = await fetchJson<ClosedPositionsPage>(`/closed-positions/page?${params}`, controller.signal);
+        if (stopped) return;
+        setClosedPositions(data.items);
+        setClosedPositionsTotal(data.total);
+        setLoadStatus((current) => ({ ...current, closedPositions: 'ready' }));
+        refreshTimer = window.setTimeout(loadClosedPositions, HISTORY_REFRESH_INTERVAL_MS);
+      } catch (error) {
+        if (stopped || isAbortError(error)) return;
+        console.error('Failed to load closed positions:', error);
+        setLoadStatus((current) => ({
+          ...current,
+          closedPositions: hasUsableData(current.closedPositions) ? 'stale' : 'error',
+        }));
+        refreshTimer = window.setTimeout(loadClosedPositions, HISTORY_REFRESH_INTERVAL_MS);
+      }
+    };
 
-  useEffect(() => {
-    setClosedPositionsPage(1);
-  }, [closedPositionSort, closedPositions.length]);
+    void loadClosedPositions();
+    return () => {
+      stopped = true;
+      if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
+      controller.abort();
+    };
+  }, [closedPositionSort, closedPositionsPage]);
 
-  if (loading) {
-    return (
-      <div className="flex h-screen items-center justify-center bg-[#0a0a0a] text-[#a3a3a3] font-mono text-sm tracking-widest">
-        INITIALIZING TERMINAL...
-      </div>
-    );
-  }
-
-  const regularHoursPerformance = performance.filter((pt) => isRegularTradingHours(pt.timestamp));
+  const regularHoursPerformance = useMemo(
+    () => performance.filter((pt) => isRegularTradingHours(pt.timestamp)),
+    [performance],
+  );
   const selectedRange = CHART_RANGES.find((range) => range.label === chartRange) ?? CHART_RANGES[CHART_RANGES.length - 1];
   const latestChartTimestamp = regularHoursPerformance.at(-1)
     ? new Date(regularHoursPerformance.at(-1)!.timestamp).getTime()
@@ -133,21 +295,7 @@ export default function App() {
   const chartPerformanceWithBenchmark = chartPerformance.filter((pt) => pt.spy_price && pt.spy_price > 0);
   const initialEquity = chartPerformance[0]?.equity || performance[0]?.equity || 1000000;
   const initialSpy = chartPerformanceWithBenchmark[0]?.spy_price || 1;
-  let lastSpy = initialSpy;
-
-  const chartData: ChartPoint[] = chartPerformance.map((pt, index) => {
-    if (pt.spy_price && pt.spy_price > 0) {
-      lastSpy = pt.spy_price;
-    }
-
-    return {
-      ...pt,
-      timestampMs: new Date(pt.timestamp).getTime(),
-      tradingIndex: index,
-      fullDate: format(new Date(pt.timestamp), 'MMM d, yyyy HH:mm'),
-      spyNormalized: showBenchmark ? (lastSpy / initialSpy) * initialEquity : null,
-    };
-  });
+  const chartData = buildChartData(chartPerformance, showBenchmark, initialSpy, initialEquity);
 
   const desiredTickCount = 6;
   const tickStep = Math.max(1, Math.ceil(chartData.length / desiredTickCount));
@@ -171,26 +319,11 @@ export default function App() {
     (currentMobileExecutionPage - 1) * MOBILE_EXECUTION_PAGE_SIZE,
     currentMobileExecutionPage * MOBILE_EXECUTION_PAGE_SIZE,
   );
-  const sortedClosedPositions = [...closedPositions].sort((a, b) => {
-    switch (closedPositionSort) {
-      case 'gainCash':
-        return b.realized_pnl - a.realized_pnl;
-      case 'lossCash':
-        return a.realized_pnl - b.realized_pnl;
-      case 'gainPercent':
-        return b.realized_return_pct - a.realized_return_pct;
-      case 'lossPercent':
-        return a.realized_return_pct - b.realized_return_pct;
-      default:
-        return 0;
-    }
-  });
-  const closedPositionsPageCount = Math.max(1, Math.ceil(sortedClosedPositions.length / CLOSED_POSITIONS_PAGE_SIZE));
+  const closedPositionsPageCount = Math.max(1, Math.ceil(closedPositionsTotal / CLOSED_POSITIONS_PAGE_SIZE));
   const currentClosedPositionsPage = Math.min(closedPositionsPage, closedPositionsPageCount);
-  const paginatedClosedPositions = sortedClosedPositions.slice(
-    (currentClosedPositionsPage - 1) * CLOSED_POSITIONS_PAGE_SIZE,
-    currentClosedPositionsPage * CLOSED_POSITIONS_PAGE_SIZE,
-  );
+  const paginatedClosedPositions = closedPositions;
+  const criticalDataReady = hasUsableData(loadStatus.portfolio) && hasUsableData(loadStatus.holdings);
+  const hasLoadError = Object.values(loadStatus).some((status) => status === 'error' || status === 'stale');
 
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-[#d4d4d4] font-sans p-4 sm:p-8 selection:bg-[#262626]">
@@ -201,6 +334,13 @@ export default function App() {
           <div>
             <h1 className="text-3xl font-medium text-[#ededed] tracking-tight">GABE<span className="text-[#3b82f6]">TRADING</span></h1>
             <p className="text-[11px] text-[#737373] mt-2 uppercase tracking-[0.2em] font-mono">Autonomous S&P 500 Simulation Engine</p>
+            <div className="mt-3 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.18em] text-[#737373]" aria-live="polite">
+              <span className={`h-1.5 w-1.5 rounded-full ${hasLoadError ? 'bg-[#f59e0b]' : criticalDataReady ? 'bg-[#10b981]' : 'animate-pulse bg-[#3b82f6]'}`} />
+              <span>{hasLoadError ? 'Partial data' : criticalDataReady ? 'Live' : 'Connecting'}</span>
+              {lastUpdatedAt && criticalDataReady && (
+                <span className="text-[#404040]">· {format(lastUpdatedAt, 'HH:mm:ss')}</span>
+              )}
+            </div>
             <a
               href="/old/"
               className="mt-3 inline-block font-mono text-[10px] uppercase tracking-[0.2em] text-[#404040] transition-colors hover:text-[#737373]"
@@ -209,7 +349,7 @@ export default function App() {
             </a>
           </div>
           
-          {portfolio && (
+          {hasUsableData(loadStatus.portfolio) && portfolio ? (
             <div className="grid grid-cols-2 gap-4 font-mono sm:flex sm:flex-wrap sm:gap-8">
               <div className="flex flex-col">
                 <span className="text-[#737373] text-[10px] uppercase tracking-wider mb-1">Total Equity</span>
@@ -227,6 +367,15 @@ export default function App() {
                 <span className="text-[#737373] text-[10px] uppercase tracking-wider mb-1">Open Pos</span>
                 <span className="text-xl sm:text-2xl text-[#ededed]">{portfolio.holdings_count}</span>
               </div>
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 gap-4 font-mono sm:flex sm:gap-8" aria-label="Loading portfolio summary">
+              {['Total Equity', 'Cash Balance', 'Net Exposure', 'Open Pos'].map((label) => (
+                <div key={label} className="flex min-w-28 flex-col">
+                  <span className="mb-2 text-[10px] uppercase tracking-wider text-[#737373]">{label}</span>
+                  <span className={`h-6 rounded-sm ${loadStatus.portfolio === 'error' ? 'bg-[#2a1717]' : 'animate-pulse bg-[#1f1f1f]'}`} />
+                </div>
+              ))}
             </div>
           )}
         </header>
@@ -274,81 +423,22 @@ export default function App() {
                 </div>
               </div>
               <div className="h-[360px] min-w-0 w-full">
-                {chartData.length > 0 ? (
-                  <ResponsiveContainer width="100%" height="100%">
-                      <AreaChart data={chartData} margin={{ top: 5, right: 5, left: -20, bottom: 25 }}>
-                      <defs>
-                        <linearGradient id="colorEquity" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.3}/>
-                          <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/>
-                        </linearGradient>
-                      </defs>
-                      <CartesianGrid strokeDasharray="2 4" stroke="#262626" vertical={false} />
-                      <XAxis 
-                        dataKey="tradingIndex"
-                        type="number"
-                        domain={['dataMin', 'dataMax']}
-                        ticks={xAxisTicks}
-                        stroke="#525252" 
-                        fontSize={11} 
-                        fontFamily="monospace"
-                        tickFormatter={(value) => {
-                          const point = chartPointsByIndex.get(Number(value));
-                          if (!point) {
-                            return '';
-                          }
-                          return format(new Date(point.timestamp), spansMultipleYears ? 'MMM d, yy' : spansMultipleDays ? 'MMM d' : 'HH:mm');
-                        }}
-                        tickLine={false}
-                        axisLine={false}
-                        dy={15}
+                {hasUsableData(loadStatus.performance) && loadedChartRange === chartRange && chartData.length > 0 ? (
+                  <ChartErrorBoundary>
+                    <Suspense fallback={<div className="flex h-full items-center justify-center font-mono text-sm text-[#525252]">PREPARING CHART...</div>}>
+                      <PerformanceChart
+                        chartData={chartData}
+                        chartPointsByIndex={chartPointsByIndex}
+                        showBenchmark={showBenchmark}
+                        spansMultipleDays={spansMultipleDays}
+                        spansMultipleYears={spansMultipleYears}
+                        xAxisTicks={xAxisTicks}
                       />
-                      <YAxis 
-                        domain={['auto', 'auto']} 
-                        stroke="#525252" 
-                        fontSize={11}
-                        fontFamily="monospace"
-                        tickFormatter={(val) => `$${(val / 1000).toFixed(0)}k`}
-                        tickLine={false}
-                        axisLine={false}
-                        width={80}
-                        dx={-10}
-                      />
-                      <Tooltip 
-                        contentStyle={{ backgroundColor: '#0a0a0a', border: '1px solid #262626', borderRadius: '2px', fontFamily: 'monospace', fontSize: '12px' }}
-                        itemStyle={{ color: '#ededed' }}
-                        labelStyle={{ color: '#737373', marginBottom: '6px' }}
-                        formatter={(val: any, name: any) => [
-                          formatCurrency(Number(val)), 
-                          name === 'equity' ? 'Equity' : 'SPY (Norm)'
-                        ]}
-                        labelFormatter={(label, payload) => payload?.[0]?.payload?.fullDate || label}
-                      />
-                      <Area 
-                        type="monotone" 
-                        dataKey="equity" 
-                        stroke="#3b82f6" 
-                        strokeWidth={2} 
-                        fillOpacity={1} 
-                        fill="url(#colorEquity)" 
-                        isAnimationActive={false}
-                      />
-                      {showBenchmark && (
-                        <Area
-                          type="monotone"
-                          dataKey="spyNormalized"
-                          stroke="#10b981"
-                          strokeWidth={1.5}
-                          strokeDasharray="4 4"
-                          fill="none"
-                          isAnimationActive={false}
-                        />
-                      )}
-                    </AreaChart>
-                  </ResponsiveContainer>
+                    </Suspense>
+                  </ChartErrorBoundary>
                 ) : (
                   <div className="flex h-full items-center justify-center text-[#525252] font-mono text-sm">
-                    AWAITING DATA...
+                    {loadStatus.performance === 'error' ? 'PERFORMANCE DATA UNAVAILABLE' : loadedChartRange !== chartRange || loadStatus.performance === 'loading' ? 'LOADING PERFORMANCE...' : 'AWAITING DATA...'}
                   </div>
                 )}
               </div>
@@ -359,7 +449,7 @@ export default function App() {
               <div className="flex items-center justify-between gap-4 border-b border-[#262626] p-4">
                 <div className="flex items-center gap-3">
                   <h2 className="text-sm font-mono text-[#a3a3a3] uppercase tracking-wider">Execution Log</h2>
-                  <span className="text-[10px] font-mono uppercase tracking-wider text-[#737373]">{trades.length} entries</span>
+                  <span className="text-[10px] font-mono uppercase tracking-wider text-[#737373]">{trades.length} recent</span>
                 </div>
               </div>
               <div className="flex-1 overflow-auto hidden md:block min-h-0">
@@ -375,7 +465,13 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#262626] font-mono">
-                    {trades.length === 0 && (
+                    {!hasUsableData(loadStatus.trades) ? (
+                      <tr>
+                        <td colSpan={6} className="px-5 py-8 text-center text-[#525252]">
+                          {loadStatus.trades === 'error' ? 'Execution data unavailable.' : 'Loading recent executions...'}
+                        </td>
+                      </tr>
+                    ) : trades.length === 0 && (
                       <tr>
                         <td colSpan={6} className="px-5 py-8 text-center text-[#525252]">No executions recorded.</td>
                       </tr>
@@ -421,7 +517,7 @@ export default function App() {
           <div className="bg-[#121212] border border-[#262626] rounded-sm flex flex-col h-full min-h-0">
             <div className="p-4 border-b border-[#262626] flex justify-between items-center shrink-0">
               <h2 className="text-sm font-mono text-[#a3a3a3] uppercase tracking-wider">Book</h2>
-              <span className="text-xs font-mono text-[#737373]">{holdings.length} POS</span>
+              <span className="text-xs font-mono text-[#737373]">{hasUsableData(loadStatus.holdings) ? holdings.length : '—'} POS</span>
             </div>
             <div className="overflow-auto flex-1">
               {/* Desktop Table */}
@@ -435,7 +531,13 @@ export default function App() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#262626] font-mono">
-                  {holdings.length === 0 && (
+                  {!hasUsableData(loadStatus.holdings) ? (
+                    <tr>
+                      <td colSpan={4} className="px-4 py-8 text-center text-[#525252]">
+                        {loadStatus.holdings === 'error' ? 'Book unavailable.' : 'Loading book...'}
+                      </td>
+                    </tr>
+                  ) : holdings.length === 0 && (
                     <tr>
                       <td colSpan={4} className="px-4 py-8 text-center text-[#525252]">Empty book.</td>
                     </tr>
@@ -474,7 +576,11 @@ export default function App() {
 
               {/* Mobile Cards */}
               <div className="md:hidden divide-y divide-[#262626]">
-                {holdings.length === 0 && (
+                {!hasUsableData(loadStatus.holdings) ? (
+                  <div className="p-8 text-center font-mono text-sm text-[#525252]">
+                    {loadStatus.holdings === 'error' ? 'Book unavailable.' : 'Loading book...'}
+                  </div>
+                ) : holdings.length === 0 && (
                   <div className="p-8 text-center font-mono text-sm text-[#525252]">Empty book.</div>
                 )}
                 {holdings.map((h, i) => {
@@ -520,12 +626,15 @@ export default function App() {
           <div className="rounded-sm border border-[#262626] bg-[#121212] flex flex-col md:hidden">
             <button
               type="button"
-              onClick={() => setShowExecutionLog((value) => !value)}
+              onClick={() => {
+                setMobileExecutionPage(1);
+                setShowExecutionLog((value) => !value);
+              }}
               className="flex items-center justify-between gap-4 border-b border-[#262626] p-4 text-left transition-colors hover:bg-[#171717]"
             >
               <div className="flex items-center gap-3">
                 <h2 className="text-sm font-mono text-[#a3a3a3] uppercase tracking-wider">Execution Log</h2>
-                <span className="text-[10px] font-mono uppercase tracking-wider text-[#737373]">{trades.length} entries</span>
+                <span className="text-[10px] font-mono uppercase tracking-wider text-[#737373]">{trades.length} recent</span>
               </div>
               <span className="font-mono text-[10px] uppercase tracking-wider text-[#737373]">
                 {showExecutionLog ? 'Hide' : 'Show'}
@@ -533,7 +642,11 @@ export default function App() {
             </button>
             {showExecutionLog && (
               <div className="divide-y divide-[#262626]">
-                {trades.length === 0 && (
+                {!hasUsableData(loadStatus.trades) ? (
+                  <div className="px-5 py-8 text-center font-mono text-sm text-[#525252]">
+                    {loadStatus.trades === 'error' ? 'Execution data unavailable.' : 'Loading recent executions...'}
+                  </div>
+                ) : trades.length === 0 && (
                   <div className="px-5 py-8 text-center font-mono text-sm text-[#525252]">No executions recorded.</div>
                 )}
                 {mobileExecutionTrades.map((t, i) => {
@@ -607,13 +720,18 @@ export default function App() {
           <div className="flex flex-col gap-4 border-b border-[#262626] p-4 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex items-center gap-3">
               <h2 className="text-sm font-mono text-[#a3a3a3] uppercase tracking-wider">Closed Positions</h2>
-              <span className="text-[10px] font-mono uppercase tracking-wider text-[#737373]">{closedPositions.length} closed</span>
+              <span className="text-[10px] font-mono uppercase tracking-wider text-[#737373]">{closedPositionsTotal} closed</span>
             </div>
             <label className="flex items-center gap-3 font-mono text-[10px] uppercase tracking-wider text-[#737373]">
               <span>Sort</span>
               <select
                 value={closedPositionSort}
-                onChange={(event) => setClosedPositionSort(event.target.value as ClosedPositionSort)}
+                onChange={(event) => {
+                  setClosedPositions([]);
+                  setLoadStatus((current) => ({ ...current, closedPositions: 'loading' }));
+                  setClosedPositionsPage(1);
+                  setClosedPositionSort(event.target.value as ClosedPositionSort);
+                }}
                 className="rounded-sm border border-[#262626] bg-[#0f0f0f] px-3 py-2 text-[#d4d4d4] outline-none transition-colors hover:border-[#404040]"
               >
                 <option value="gainPercent">Biggest Gain (%)</option>
@@ -637,7 +755,13 @@ export default function App() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#262626] font-mono">
-                {sortedClosedPositions.length === 0 && (
+                {!hasUsableData(loadStatus.closedPositions) ? (
+                  <tr>
+                    <td colSpan={7} className="px-4 py-8 text-center text-[#525252]">
+                      {loadStatus.closedPositions === 'error' ? 'Closed positions unavailable.' : 'Loading closed positions...'}
+                    </td>
+                  </tr>
+                ) : closedPositionsTotal === 0 && (
                   <tr>
                     <td colSpan={7} className="px-4 py-8 text-center text-[#525252]">No closed positions yet.</td>
                   </tr>
@@ -665,7 +789,11 @@ export default function App() {
             </table>
 
             <div className="divide-y divide-[#262626] md:hidden">
-              {sortedClosedPositions.length === 0 && (
+              {!hasUsableData(loadStatus.closedPositions) ? (
+                <div className="px-4 py-8 text-center font-mono text-sm text-[#525252]">
+                  {loadStatus.closedPositions === 'error' ? 'Closed positions unavailable.' : 'Loading closed positions...'}
+                </div>
+              ) : closedPositionsTotal === 0 && (
                 <div className="px-4 py-8 text-center font-mono text-sm text-[#525252]">No closed positions yet.</div>
               )}
               {paginatedClosedPositions.map((position, index) => (
@@ -702,11 +830,15 @@ export default function App() {
                 </div>
               ))}
             </div>
-            {sortedClosedPositions.length > CLOSED_POSITIONS_PAGE_SIZE && (
+            {closedPositionsTotal > CLOSED_POSITIONS_PAGE_SIZE && (
               <div className="flex items-center justify-between gap-4 border-t border-[#262626] px-4 py-3 font-mono text-[10px] uppercase tracking-wider text-[#737373]">
                 <button
                   type="button"
-                  onClick={() => setClosedPositionsPage((page) => Math.max(1, page - 1))}
+                  onClick={() => {
+                    setClosedPositions([]);
+                    setLoadStatus((current) => ({ ...current, closedPositions: 'loading' }));
+                    setClosedPositionsPage((page) => Math.max(1, page - 1));
+                  }}
                   disabled={currentClosedPositionsPage === 1}
                   className="rounded-sm border border-[#262626] px-3 py-2 transition-colors enabled:hover:bg-[#171717] disabled:cursor-not-allowed disabled:opacity-40"
                 >
@@ -717,7 +849,11 @@ export default function App() {
                 </span>
                 <button
                   type="button"
-                  onClick={() => setClosedPositionsPage((page) => Math.min(closedPositionsPageCount, page + 1))}
+                  onClick={() => {
+                    setClosedPositions([]);
+                    setLoadStatus((current) => ({ ...current, closedPositions: 'loading' }));
+                    setClosedPositionsPage((page) => Math.min(closedPositionsPageCount, page + 1));
+                  }}
                   disabled={currentClosedPositionsPage === closedPositionsPageCount}
                   className="rounded-sm border border-[#262626] px-3 py-2 transition-colors enabled:hover:bg-[#171717] disabled:cursor-not-allowed disabled:opacity-40"
                 >
